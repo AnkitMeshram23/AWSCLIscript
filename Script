@@ -1,0 +1,78 @@
+#!/bin/bash
+
+echo "Enter the VPC name"
+read vpc_name
+echo "VPC CIDR"
+read vpccidr
+echo "Public Subnet CIDR"
+read pubcidr
+echo "Private Subnet CIDR"
+read pricidr
+
+#creating a VPC
+vpc_id=$(aws ec2 create-vpc --cidr-block $vpccidr --query Vpc.VpcId --output text)
+aws ec2 describe-vpc-attribute \
+        --vpc_id $vpc_id \
+            --attribute enableDNSSupport
+
+echo "VPC created with id $vpc_id"
+
+#creating two subnets
+pub_sub=$(aws ec2 create-subnet --vpc-id $vpc_id --cidr-block $pubcidr --availability-zone ap-south-1a --query 'Subnet.{SubnetId:SubnetId}' --output text)
+aws ec2 modify-subnet-attribute \
+        --subnet-id $pub_sub \
+        --map-public-ip-on-launch
+echo "Public $pub_sub created"
+
+pri_sub=$(aws ec2 create-subnet --vpc-id $vpc_id --cidr-block $pricidr --availability-zone ap-south-1b --query 'Subnet.{SubnetId:SubnetId}' --output text)
+echo "Private $pri_sub created"
+
+#creating internet gateway for public subnet
+igw_id=$(aws ec2 create-internet-gateway --query InternetGateway.InternetGatewayId --output text)
+echo "Internet Gateway created with id $igw_id"
+
+#attaching internet gateway to the vpc
+aws ec2 attach-internet-gateway --vpc-id $vpc_id --internet-gateway-id $igw_id
+echo "igw_id attached to $vpc_id"
+
+#Creating the public route table,adding routes to internet gateway and associating route table to public subnet
+
+rt_id=$(aws ec2 create-route-table --vpc-id $vpc_id --query RouteTable.RouteTableId --output text)
+echo "Public route table create $rt_id"
+aws ec2 create-route --route-table-id $rt_id --destination-cidr-block 0.0.0.0/0 --gateway-id $igw_id
+echo "Routes added to $rt_id internet gateway $igw_id"
+aws ec2 associate-route-table  --subnet-id $pub_sub --route-table-id $rt_id
+#Creating private route table and assosiating with private subnet
+rtpr_id=$(aws ec2 create-route-table --vpc-id $vpc_id --query RouteTable.RouteTableId --output text)
+echo "Private route table created $rtpr_id"
+aws ec2 associate-route-table  --subnet-id $pri_sub --route-table-id $rtpr_id
+
+echo "Creating Security groups for NAT"
+sgssh=$(aws ec2 create-security-group --group-name SSHAccess --description "SSH access & HTTP" --vpc-id $vpc_id --output text)
+aws ec2 authorize-security-group-ingress --group-id $sgssh --protocol tcp --port 22 --cidr 106.195.0.57/32
+aws ec2 authorize-security-group-ingress --group-id $sgssh --protocol tcp --port 80 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $sgssh --protocol tcp --port 8080 --cidr 0.0.0.0/0
+aws ec2 authorize-security-group-ingress --group-id $sgssh --protocol icmp --port -1 --source-group $sgssh
+
+echo "created security group for NAT $sgssh"
+
+#Launching NAT instance
+nat_id=$(aws ec2 run-instances --image-id ami-00999044593c895de --count 1 --instance-type t2.micro --key-name ank13-12 --security-group-ids $sgssh --subnet-id $pub_sub --user-data file://apache.sh)
+echo "NAT instance created $nat_id"
+aws ec2 wait instance-running --instance-ids $nat_id
+aws ec2 modify-instance-attribute --instance-id=$nat_id --source-dest-check
+echo "Creating security groups for private instance"
+sgsshpri=$(aws ec2 create-security-group --group-name PRIVATESSHAccess --description "SSH access & HTTP" --vpc-id $vpc_id --output text)
+aws ec2 authorize-security-group-ingress --group-id $sgsshpri --protocol tcp --port 22 --source-group $sgssh
+#aws ec2 authorize-security-group-ingress --group-id $sgsshpri --protocol tcp --port 80 --source-group $sgssh
+aws ec2 authorize-security-group-ingress --group-id $sgsshpri --protocol tcp --port 8080 --source-group $sgssh
+#aws ec2 authorize-security-group-ingress --group-id $sgsshpri --protocol icmp --port -1 --source-group $sgssh
+echo "Created security group for private instance $sgsshpri"
+
+#Launching Private Instance
+pri_ec2=$(aws ec2 run-instances --image-id ami-0af25d0df86db00c1 --count 1 --instance-type t2.micro --key-name ank13-12 --security-group-ids $sgsshpri --subnet-id $pri_sub --user-data file://tomcat.sh)
+echo "Private VM created"
+
+#Adding NAT routes to private subnet route table
+aws ec2 create-route --route-table-id $rtpr_id --destination-cidr-block 0.0.0.0/0 --instance-id $nat_id
+echo "Added NAT instance routes to Private subnet route table"
