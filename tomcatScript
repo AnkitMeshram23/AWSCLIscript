@@ -1,0 +1,6 @@
+sudo su
+sudo yum install java -y
+cd /opt/
+wget https://dlcdn.apache.org/tomcat/tomcat-9/v9.0.58/bin/apache-tomcat-9.0.58.tar.gz
+tar -zxvf apache-tomcat-9.0.58.tar.gz
+mv apache-tomcat-9.0.58.tar.gz tomcat
